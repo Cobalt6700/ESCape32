@@ -18,7 +18,7 @@
 #include "common.h"
 
 #define REVISION 15
-#define REVPATCH 0
+#define REVPATCH 1
 
 const Cfg cfgdata = {
 	.id = 0x32ea,
@@ -82,7 +82,7 @@ static int oldstep, step, sine, sync, ival, cutback, led;
 static char prep, fast, lock, tick, ready, reverse;
 static uint32_t tickms, tickmsv;
 static volatile char tickmsf;
-static const char *starttune [] = {"250cc#d#ef#g#a#b"};
+static const char *starttune = {"250cc#d#ef#g#a#b"};
 #ifndef HALL_MAP
 static const int hall;
 #else
