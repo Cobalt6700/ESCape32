@@ -625,6 +625,7 @@ void main(void) {
 		}
 		delay(250, delayf);
 		playmusic(starttune, cfg.volume);
+		delay(250, delayf);
 	}
 	if (cfg.arm || (csr & RCC_CSR_WWDGRSTF)) { // Arming required
 	rearm:
