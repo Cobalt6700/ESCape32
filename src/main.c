@@ -85,6 +85,7 @@ static int oldstep, step, sine, ival, cutback;
 static char prep, sync, fast, lock, led, ready, reverse;
 static uint32_t tickv;
 static volatile char tickf;
+static const char *starttune = {"250cc#d#ef#g#a#b"};
 #ifndef HALL_MAP
 static const int hall;
 #else
@@ -503,7 +504,9 @@ static void delayf(void) {
 
 static void beep(void) {
 	static const char *const beacons[] = {"EG", "FA", "GB", "AB#", "aDGE"};
-	static const char *const values[] = {"c6", "C2", "D2C2", "E2D2C2", "F#2E2D2C2", "G#A#G#A#G#2", "G#A#G#A#F#2G#2", "G#A#G#A#E2F#2G#2", "G#A#G#A#D2E2F#2G#2", "G#A#G#A#C2D2E2F#2G#2", 0};
+	//static const char *const values[] = {"c6", "C2", "D2C2", "E2D2C2", "F#2E2D2C2", "G#A#G#A#G#2", "G#A#G#A#F#2G#2", "G#A#G#A#E2F#2G#2", "G#A#G#A#D2E2F#2G#2", "G#A#G#A#C2D2E2F#2G#2", 0};
+	static const char *const values[] = {"c6", "d2_", "d2_d2_", "d2_d2_d2_", "d2_d2_d2_d2_", "d2_d2_d2_d2_d2_", "d2_d2_d2_d2_d2_d2_", "d2_d2_d2_d2_d2_d2_d2_", "d2_d2_d2_d2_d2_d2_d2_d2_", "d2_d2_d2_d2_d2_d2_d2_d2_d2_", 0};
+	
 	if (beacon) {
 		playmusic(beacons[beacon - 1], cfg.beacon);
 		beacon = 0;
@@ -624,8 +627,11 @@ void main(void) {
 			beepval = cells;
 			delay(4000, delayf);
 			beep();
-		}
+		}		
 #endif
+		delay(4000, delayf);
+		playmusic(starttune, cfg.volume);
+		delay(4000, delayf);
 	}
 	if (cfg.arm || (csr & RCC_CSR_WWDGRSTF)) { // Arming required
 	rearm:
