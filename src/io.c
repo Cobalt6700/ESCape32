@@ -76,7 +76,6 @@ void iotim2_isr(void) {
 #else
 	int x = TIM_CCR2(IOTIM2);
 #endif
-	if (x < 800 || x > 2200) return; // Invalid signal
 	setbrake(x);
 }
 #endif
@@ -199,14 +198,18 @@ static void entryirq(void) {
 				iofunc = crsffunc;
 				USART2_BRR = CLK_CNT(416666);
 				break;
+#ifndef DISABLE_EXBUS
 			case 6: // EXBUS
 				iofunc = exbusfunc;
 				USART2_BRR = CLK_CNT(125000);
 				break;
+#endif
+#ifndef DISABLE_HOTT
 			case 7: // HoTT
 				iofunc = hottfunc;
 				USART2_BRR = CLK_CNT(115200);
 				break;
+#endif
 		}
 		USART2_CR3 = USART_CR3_HDSEL | USART_CR3_DMAT | USART_CR3_DMAR;
 		USART2_CR1 |= USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_IDLEIE;
@@ -220,6 +223,7 @@ static void entryirq(void) {
 #endif
 	if (TIM_PSC(IOTIM)) {
 		if (t > 2000) { // Servo/Oneshot125
+			if (n < 8) return;
 			ioirq = calibirq;
 			TIM_DIER(IOTIM) = TIM_DIER_CC1IE;
 			TIM_CR1(IOTIM) = TIM_CR1_CEN;
@@ -245,6 +249,7 @@ static void entryirq(void) {
 	TIM_CCER(IOTIM) = 0;
 	TIM_CCMR1(IOTIM) = TIM_CCMR1_CC1S_IN_TRC | TIM_CCMR1_IC1F_CK_INT_N_8;
 	TIM_SMCR(IOTIM) = TIM_SMCR_SMS_RM | TIM_SMCR_TS_TI1F_ED; // Reset on any edge on TI1
+	TIM_CCER(IOTIM) = TIM_CCER_CC1E; // IC1 on any edge on TI1
 	TIM_DIER(IOTIM) = TIM_DIER_UIE;
 	TIM_ARR(IOTIM) = dshotarr1; // Frame reset timeout
 	TIM_EGR(IOTIM) = TIM_EGR_UG;
@@ -289,24 +294,31 @@ static void servoirq(void) {
 		telreq = 1;
 		return;
 	}
-	if (x < 800 || x > 2200) return; // Invalid signal
+	if (x < 800 || x > 2200) { // Invalid signal
+		if (ertm) return;
+		WWDG_CR = WWDG_CR_WDGA;
+	}
 	IWDG_KR = IWDG_KR_RESET;
 	setthrot(x);
 }
 
 static void dshotirq(void) {
-	if (!(TIM_DIER(IOTIM) & TIM_DIER_UIE) || !(TIM_SR(IOTIM) & TIM_SR_UIF)) return; // Fall through exactly once
+	static char n;
+	if (!(TIM_DIER(IOTIM) & TIM_DIER_UIE) || !(TIM_SR(IOTIM) & TIM_SR_UIF)) return;
 	TIM_SR(IOTIM) = ~TIM_SR_UIF;
-	if (!TIM_CCER(IOTIM)) { // Detect DSHOT polarity
-		TIM_CCER(IOTIM) = TIM_CCER_CC1E; // IC1 on any edge on TI1
-		dshotinv = IOTIM_IDR; // Inactive level
+	if ((TIM_DIER(IOTIM) & TIM_DIER_CC1DE) && DMA1_CNDTR(IOTIM_DMA) == 32 && dshotinv == IOTIM_IDR) {
+		if (++n < 4) return;
+		TIM_ARR(IOTIM) = -1; // Don't trigger UEV for timebase consistency
+		TIM_CR1(IOTIM) = TIM_CR1_CEN | TIM_CR1_ARPE;
+		TIM_DIER(IOTIM) = TIM_DIER_CC1DE;
+		return;
 	}
+	DMA1_CCR(IOTIM_DMA) = 0;
 	DMA1_CNDTR(IOTIM_DMA) = 32;
 	DMA1_CCR(IOTIM_DMA) = DMA_CCR_EN | DMA_CCR_TCIE | DMA_CCR_CIRC | DMA_CCR_MINC | DMA_CCR_PSIZE_16BIT | DMA_CCR_MSIZE_16BIT;
-	TIM_ARR(IOTIM) = -1;
-	TIM_EGR(IOTIM) = TIM_EGR_UG;
-	TIM_CR1(IOTIM) = TIM_CR1_CEN | TIM_CR1_ARPE;
-	TIM_DIER(IOTIM) = TIM_DIER_CC1DE;
+	TIM_DIER(IOTIM) = TIM_DIER_UIE | TIM_DIER_CC1DE;
+	dshotinv = IOTIM_IDR;
+	n = 0;
 }
 
 static void dshotreset(void) {
@@ -334,7 +346,6 @@ static void dshotreset(void) {
 
 static void dshotresync(void) {
 	if (dshotinv) dshotreset();
-	DMA1_CCR(IOTIM_DMA) = 0;
 	TIM_CR1(IOTIM) = TIM_CR1_CEN | TIM_CR1_ARPE | TIM_CR1_URS;
 	TIM_ARR(IOTIM) = dshotarr1; // Frame reset timeout
 	TIM_EGR(IOTIM) = TIM_EGR_UG;
@@ -353,6 +364,7 @@ void iotim_dma_isr(void) { // DSHOT
 	static const char gcr[] = {0x19, 0x1b, 0x12, 0x13, 0x1d, 0x15, 0x16, 0x17, 0x1a, 0x09, 0x0a, 0x0b, 0x1e, 0x0d, 0x0e, 0x0f};
 	static char cmd, cnt, rep;
 	DMA1_IFCR = DMA_IFCR_CTCIF(IOTIM_DMA);
+	if (TIM_DIER(IOTIM) & TIM_DIER_UIE) return; // Bad sync
 	if (DMA1_CCR(IOTIM_DMA) & DMA_CCR_DIR) {
 		dshotreset();
 		if (!dshotval) {
@@ -403,8 +415,7 @@ void iotim_dma_isr(void) { // DSHOT
 			dshotresync();
 			return;
 		}
-		x <<= 1;
-		if (buf[i + 1] >= z) x |= 1;
+		x = x << 1 | (buf[i + 1] >= z);
 	}
 	if (dshotcrc(x, dshotinv)) { // Invalid checksum
 		dshotresync();
@@ -569,6 +580,7 @@ static int getchan2(const char *buf, int m, int n, int s) { // EXBUS/HoTT
 static void serialirq(void) {
 	if (USART2_CR1 & USART_CR1_TCIE) {
 		USART2_CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_IDLEIE;
+		DMA1_CCR(USART2_TX_DMA) = 0;
 		goto reading;
 	}
 #ifdef AT32F4
@@ -577,6 +589,7 @@ static void serialirq(void) {
 	USART2_RQR = USART_RQR_RXFRQ; // Clear RXNE
 	USART2_ICR = USART_ICR_IDLECF | USART_ICR_ORECF;
 #endif
+	DMA1_CCR(USART2_RX_DMA) = 0;
 	int len = iofunc(sizeof iobuf - DMA1_CNDTR(USART2_RX_DMA));
 	if (len) {
 		if (len < 0) return;
@@ -586,13 +599,11 @@ static void serialirq(void) {
 		USART2_ICR = USART_ICR_TCCF;
 #endif
 		USART2_CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_TCIE;
-		DMA1_CCR(USART2_TX_DMA) = 0;
 		DMA1_CNDTR(USART2_TX_DMA) = len;
 		DMA1_CCR(USART2_TX_DMA) = DMA_CCR_EN | DMA_CCR_DIR | DMA_CCR_MINC | DMA_CCR_PSIZE_8BIT | DMA_CCR_MSIZE_8BIT;
 		return;
 	}
 reading:
-	DMA1_CCR(USART2_RX_DMA) = 0;
 	DMA1_CNDTR(USART2_RX_DMA) = sizeof iobuf;
 	DMA1_CCR(USART2_RX_DMA) = DMA_CCR_EN | DMA_CCR_MINC | DMA_CCR_PSIZE_8BIT | DMA_CCR_MSIZE_8BIT;
 }
@@ -699,7 +710,6 @@ static void sbusirq1(void) {
 	TIM15_ARR = -1;
 	TIM15_EGR = TIM_EGR_UG;
 	USART2_CR1 = USART_CR1_PCE | USART_CR1_M0 | USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_IDLEIE;
-	DMA1_CCR(USART2_RX_DMA) = 0;
 	DMA1_CNDTR(USART2_RX_DMA) = sizeof iobuf;
 	DMA1_CCR(USART2_RX_DMA) = DMA_CCR_EN | DMA_CCR_MINC | DMA_CCR_PSIZE_8BIT | DMA_CCR_MSIZE_8BIT;
 	ioirq = serialirq;
@@ -741,10 +751,9 @@ static void sbusirq2(void) {
 			b = a >> 8;
 			break;
 	}
-	iobuf[0] = slot[n + (cfg.telem_phid - 1) * 6];
+	iobuf[0] = slot[n + (telphid - 1) * 6];
 	iobuf[1] = a;
 	iobuf[2] = b;
-	DMA1_CCR(USART2_TX_DMA) = 0;
 	DMA1_CNDTR(USART2_TX_DMA) = 3;
 	DMA1_CCR(USART2_TX_DMA) = DMA_CCR_EN | DMA_CCR_DIR | DMA_CCR_MINC | DMA_CCR_PSIZE_8BIT | DMA_CCR_MSIZE_8BIT;
 	if (++n < 6) return;
@@ -760,7 +769,7 @@ static int sbusfunc(int len) {
 	setbrake(getchan1(iobuf + 1, cfg.input_ch2 - 1));
 	int a = iobuf[24];
 	if ((a & 0xf) != 0x4) return 0; // No telemetry
-	if (telmode == 2 || telmode == 3 || telmode == 5 || a >> 4 != cfg.telem_phid - 1) {
+	if ((telmode >= 2 && telmode <= 5) || a >> 4 != telphid - 1) {
 		ioirq = sbusirq1;
 		__disable_irq();
 		TIM15_ARR = 57279 - TIM15_CNT; // Disable RX for 2000+660*8-120=7160us
@@ -782,10 +791,33 @@ static int sbusfunc(int len) {
 }
 
 static int crsffunc(int len) {
-	if (len != 26 || iobuf[1] != 0x18 || iobuf[2] != 0x16 || crc8dvbs2(iobuf + 2, 24)) return 0;
-	IWDG_KR = IWDG_KR_RESET;
-	setthrot(getchan1(iobuf + 3, cfg.input_ch1 - 1));
-	setbrake(getchan1(iobuf + 3, cfg.input_ch2 - 1));
+	if (len > 128) return 0; // CSRF physical layer requirement
+	for (char *buf = iobuf, *res = buf + len; len >= 4;) {
+		int a = buf[1];
+		int b = a + 2;
+		if (a < 2 || b > 64 || (len -= b) < 0 || crc8dvbs2(buf + 2, a)) break;
+		IWDG_KR = IWDG_KR_RESET;
+		switch (buf[2]) {
+			case 0x16: // Channel data
+				if (a < 24) break;
+				setthrot(getchan1(buf + 3, cfg.input_ch1 - 1));
+				setbrake(getchan1(buf + 3, cfg.input_ch2 - 1));
+				break;
+#ifndef SMALL_DEVICE
+			case 0x28: // Ping
+			case 0x2c: // Read
+			case 0x2d: // Write
+				if (telmode != 4 || !(a = min(execcrsfcmd(buf + 2, a - 1, res + 2), 61))) break;
+				res[0] = 0xc8;
+				res[1] = a + 1;
+				res[a + 2] = crc8dvbs2(res + 2, a);
+				sendtelemdata(res, a + 3);
+				break;
+#endif
+		}
+		if (!len) break;
+		buf += b;
+	}
 	return 0;
 }
 
@@ -855,22 +887,22 @@ static int exbusresp(int x) {
 static int exbusfunc(int len) {
 	static char n = 10;
 	for (char *buf = iobuf; len >= 8;) {
-		int pos = buf[2];
-		int pfx = buf[5];
-		if ((len -= pos) < 0 || pos != pfx + 8 || crc16ccitt(buf, pos)) break;
+		int a = buf[2];
+		int b = buf[5];
+		if (a != b + 8 || (len -= a) < 0 || crc16ccitt(buf, a)) break;
 		IWDG_KR = IWDG_KR_RESET;
 		switch (buf[4]) {
 			case 0x31: // Channel data
-				setthrot(getchan2(buf + 6, pfx >> 1, cfg.input_ch1 - 1, -1));
-				setbrake(getchan2(buf + 6, pfx >> 1, cfg.input_ch2 - 1, -1));
+				setthrot(getchan2(buf + 6, b >> 1, cfg.input_ch1 - 1, -1));
+				setbrake(getchan2(buf + 6, b >> 1, cfg.input_ch2 - 1, -1));
 				n = 0;
 				break;
 			case 0x3a: // Telemetry request
-				if (len || pfx) break;
+				if (len || b) break;
 				return exbusresp(buf[3]);
 		}
 		if (!len) return 0;
-		buf += pos;
+		buf += a;
 	}
 	if (!n) return 0;
 	USART2_BRR = --n & 1 ? CLK_CNT(250000) : CLK_CNT(125000);
@@ -880,26 +912,25 @@ static int exbusfunc(int len) {
 static int hottfunc(int len) {
 	if (len < 5 || iobuf[0] != 0xa8 || crc16xmodem(iobuf, len - 2) != (iobuf[len - 2] << 8 | iobuf[len - 1])) return 0;
 	IWDG_KR = IWDG_KR_RESET;
-	int num = iobuf[2];
-	int pfx = num << 1;
-	if (pfx != len - 5) return 0;
+	int a = iobuf[2];
+	int b = a << 1;
+	if (b != len - 5) return 0;
 	switch (iobuf[1] & 0x7f) {
 		case 1: // SUMDv1
-			setthrot(getchan2(iobuf + 3, num, cfg.input_ch1 - 1, 0));
-			setbrake(getchan2(iobuf + 3, num, cfg.input_ch2 - 1, 0));
+			setthrot(getchan2(iobuf + 3, a, cfg.input_ch1 - 1, 0));
+			setbrake(getchan2(iobuf + 3, a, cfg.input_ch2 - 1, 0));
 			break;
-		case 3: { // SUMDv3
+		case 3: // SUMDv3
 			static const char map[] = {0x60, 0x61, 0x80, 0x82, 0x84, 0x60}; // Function code mapping
-			int code = iobuf[pfx - 1];
-			if (code > 5) break;
-			int a = map[code];
-			int b = a >> 3;
-			int c = (a & 7) << 2;
-			if ((num -= 2) > b) num = b;
-			setthrot(getchan2(iobuf + 3, num, cfg.input_ch1 - 1, c));
-			setbrake(getchan2(iobuf + 3, num, cfg.input_ch2 - 1, c));
+			int c = iobuf[b - 1];
+			if (c > 5) break;
+			int d = map[c];
+			int e = d >> 3;
+			int f = (d & 7) << 2;
+			if ((a -= 2) > e) a = e;
+			setthrot(getchan2(iobuf + 3, a, cfg.input_ch1 - 1, f));
+			setbrake(getchan2(iobuf + 3, a, cfg.input_ch2 - 1, f));
 			break;
-		}
 	}
 	return 0;
 }
